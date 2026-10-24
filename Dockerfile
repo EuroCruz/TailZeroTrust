@@ -3,11 +3,6 @@ FROM golang:1.27.3-alpine3.24 AS build-env
 # Install latest version of git
 RUN apk add --update --no-cache git
 
-# Clone wireguard-tools for the reresolve-dns.sh script
-ARG WG_TOOLS_VERSION="v1.0.20260223"
-RUN git -c advice.detachedHead=false clone --branch "$WG_TOOLS_VERSION" \
-  https://github.com/WireGuard/wireguard-tools.git /go/src/wireguard-tools
-
 # Clone latest Tailscale version and patch it with customisation, some patches
 # are lifted from the PR https://github.com/tailscale/tailscale/pull/14575
 ARG TS_VERSION="v1.104.2"
@@ -16,7 +11,7 @@ COPY ./tailscale-patches /tmp/tailscale-patches
 RUN \
   git -c advice.detachedHead=false clone --branch "$TS_VERSION" \
     https://github.com/tailscale/tailscale.git /go/src/tailscale && \
-  git -c user.name="TailGuard" -c user.email="" am /tmp/tailscale-patches/*.patch
+  git -c user.name="TailZeroTrust" -c user.email="" am /tmp/tailscale-patches/*.patch
 
 # Download dependencies and build Tailscale
 RUN go mod download
@@ -24,35 +19,52 @@ RUN go mod download
 ARG TARGETARCH
 RUN \
   eval `CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/mkversion` && \
-  VERSION_LONG="$(echo $VERSION_LONG | rev | cut -d "-" -f 3- | rev)-TailGuard" && \
-  GOARCH=$TARGETARCH go install -ldflags="\
+  VERSION_LONG="$(echo $VERSION_LONG | rev | cut -d "-" -f 3- | rev)-TailZeroTrust" && \
+  CGO_ENABLED=0 GOARCH=$TARGETARCH go install -ldflags="-s -w \
       -X 'tailscale.com/version.longStamp=$VERSION_LONG' \
       -X 'tailscale.com/version.shortStamp=$VERSION_SHORT' \
       -X 'tailscale.com/version.gitCommitStamp=$VERSION_GIT_HASH'" \
-      -v ./cmd/tailscale ./cmd/tailscaled ./cmd/containerboot
+      -v ./cmd/tailscale ./cmd/tailscaled ./cmd/containerboot && \
+  mkdir -p /out && find /go/bin -type f -exec cp {} /out/ \;
 
-# Build tailguard daemon and install it
-COPY ./tgdaemon /go/src/tgdaemon
-WORKDIR /go/src/tgdaemon
-RUN go mod download
-RUN go install
+# Take only the daemon and the CLI out of the official Cloudflare WARP package,
+# the package itself depends on the whole desktop GUI stack
+FROM debian:bookworm-slim AS warp-env
 
-FROM alpine:3.24.2
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+
+ARG WARP_VERSION="2026.8.2115.0"
+ARG TARGETARCH
+RUN \
+  repo=https://pkg.cloudflareclient.com && \
+  index="$(curl -fsSL "$repo/dists/bookworm/main/binary-$TARGETARCH/Packages")" && \
+  entry="$(echo "$index" | awk -v v="$WARP_VERSION" 'BEGIN{RS=""} index($0, "\nVersion: " v "\n")')" && \
+  { [ -n "$entry" ] || { echo "cloudflare-warp $WARP_VERSION not found in $repo"; exit 1; }; } && \
+  curl -fsSL -o /tmp/warp.deb "$repo/$(echo "$entry" | sed -n 's/^Filename: //p')" && \
+  echo "$(echo "$entry" | sed -n 's/^SHA256: //p')  /tmp/warp.deb" | sha256sum -c - && \
+  dpkg-deb -x /tmp/warp.deb /tmp/warp && \
+  mkdir -p /out && cp /tmp/warp/bin/warp-svc /tmp/warp/bin/warp-cli /out/
+
+# WARP is linked against glibc, so the runtime is Debian instead of Alpine
+FROM debian:bookworm-slim
 
 RUN \
-  apk add --update --no-cache ethtool iptables ip6tables ipcalc curl wireguard-tools wireguard-go && \
-  sed -i 's|^RESTARTCMD=$|RESTARTCMD="true"|' /usr/sbin/resolvconf && \
-  sed -i 's|\[\[ $proto == -4 \]\] && cmd sysctl -q net\.ipv4\.conf\.all\.src_valid_mark=1|[[ $proto == -4 ]] \&\& [[ $(sysctl -n net.ipv4.conf.all.src_valid_mark) != 1 ]] \&\& cmd sysctl -q net.ipv4.conf.all.src_valid_mark=1|' /usr/bin/wg-quick
+  apt-get update && \
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl ethtool iproute2 iptables ipcalc-ng nftables dbus \
+    libdbus-1-3 libnss3 libtss2-esys-3.0.2-0 libtss2-tctildr0 libtss2-mu0 && \
+  ln -s /usr/bin/ipcalc-ng /usr/local/bin/ipcalc && \
+  rm -rf /var/lib/apt/lists/*
 
-WORKDIR /tailguard
+WORKDIR /tailzerotrust
 
-COPY --from=build-env /go/src/wireguard-tools/contrib/reresolve-dns/reresolve-dns.sh ./
-COPY --from=build-env /go/bin/* /usr/local/bin/
+COPY --from=build-env /out/* /usr/local/bin/
+COPY --from=warp-env /out/* /bin/
 
 COPY bin/* ./
 RUN chmod 755 *.sh
 
 HEALTHCHECK --interval=1m --timeout=10s --start-period=10s --start-interval=1s --retries=3 \
-  CMD ["/tailguard/healthcheck.sh"]
+  CMD ["/tailzerotrust/healthcheck.sh"]
 
-ENTRYPOINT ["/tailguard/entrypoint.sh"]
+ENTRYPOINT ["/tailzerotrust/entrypoint.sh"]

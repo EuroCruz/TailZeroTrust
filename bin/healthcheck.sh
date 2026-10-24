@@ -1,13 +1,37 @@
 #!/bin/sh
 
-# This is a path to execute scripts on a healthy Tailscale, 
+# This is a path to execute scripts on a healthy Tailscale,
 # must be the same path as set in entrypoint.sh
-DELAYED_SCRIPT_PATH="/tailguard/.delayed-script.sh"
-HEALTHY_EPOCH_PATH="/tailguard/.healthy-epoch"
+DELAYED_SCRIPT_PATH="/tailzerotrust/.delayed-script.sh"
+HEALTHY_EPOCH_PATH="/tailzerotrust/.healthy-epoch"
+
+TS_DEVICE="${TS_DEVICE:-tailscale0}"
+TS_PORT="${TS_PORT:-41641}"
 
 iptables="${iptables:-}"
 CHAIN="${CHAIN:-}"
 chain="${chain:-}"
+
+# The WARP firewall drops traffic bypassing the tunnel, which includes
+# Tailscale itself (marked with 0x80000 by tailscaled). WARP rebuilds its
+# table on reconnects, so the exceptions are enforced on every healthcheck.
+update_warp_firewall() {
+  nft list table inet cloudflare-warp >/dev/null 2>&1 || return 0
+  if nft list chain inet cloudflare-warp output 2>/dev/null | grep -q tailzerotrust; then
+    return 0
+  fi
+  echo "Enforcing Tailscale exceptions in the WARP firewall"
+  nft "insert rule inet cloudflare-warp output oifname \"$TS_DEVICE\" accept comment \"tailzerotrust\""
+  nft "insert rule inet cloudflare-warp output meta mark and 0xff0000 == 0x80000 accept comment \"tailzerotrust\""
+  nft "insert rule inet cloudflare-warp input iifname \"$TS_DEVICE\" accept comment \"tailzerotrust\""
+  nft "insert rule inet cloudflare-warp input udp dport $TS_PORT accept comment \"tailzerotrust\""
+  nft "insert rule inet cloudflare-warp input ct state established,related accept comment \"tailzerotrust\""
+}
+
+if [ "$1" = "warp-firewall" ]; then
+  update_warp_firewall
+  exit 0
+fi
 
 update_firewall() {
   if ! $iptables -C $CHAIN -j "ts-$chain" 2>/dev/null; then
@@ -20,6 +44,8 @@ update_firewall() {
   fi
 }
 
+update_warp_firewall
+
 iptables="iptables" CHAIN="INPUT" chain="input" update_firewall
 iptables="iptables" CHAIN="FORWARD" chain="forward" update_firewall
 iptables="iptables -t nat" CHAIN="POSTROUTING" chain="postrouting" update_firewall
@@ -27,21 +53,12 @@ iptables="ip6tables" CHAIN="INPUT" chain="input" update_firewall
 iptables="ip6tables" CHAIN="FORWARD" chain="forward" update_firewall
 iptables="ip6tables -t nat" CHAIN="POSTROUTING" chain="postrouting" update_firewall
 
-# Add PREROUTING rules for TS_DEST_IP addresses if needed
-for dest_ip in $(echo "${TS_DEST_IP}" | tr ',' '\n'); do
-  if tailscale_ipv4="$(tailscale ip -4 2>/dev/null)" && ipcalc -s -c -4 "$dest_ip"; then
-    if ! iptables -t nat -C PREROUTING -d "$tailscale_ipv4" -j DNAT --to-destination "$dest_ip" 2>/dev/null; then
-      echo "Forwarding Tailscale IPv4 address $tailscale_ipv4 to $dest_ip"
-      iptables -t nat -A PREROUTING -d "$tailscale_ipv4" -j DNAT --to-destination "$dest_ip"
-    fi
-  fi
-  if tailscale_ipv6="$(tailscale ip -6 2>/dev/null)" && ipcalc -s -c -6 "$dest_ip"; then
-    if ! ip6tables -t nat -C PREROUTING -d "$tailscale_ipv6" -j DNAT --to-destination "$dest_ip" 2>/dev/null; then
-      echo "Forwarding Tailscale IPv6 address $tailscale_ipv6 to $dest_ip"
-      ip6tables -t nat -A PREROUTING -d "$tailscale_ipv6" -j DNAT --to-destination "$dest_ip"
-    fi
-  fi
-done
+# Check WARP is connected
+if ! warp-cli --accept-tos status 2>/dev/null | grep -qw Connected; then
+  echo "WARP is not connected"
+  rm -f "${HEALTHY_EPOCH_PATH}"
+  exit 1
+fi
 
 # Check Tailscale health using the health check endpoint
 HEALTHZ_CODE="$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:9002/healthz")"

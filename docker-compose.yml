@@ -1,10 +1,17 @@
 services:
-  tailguard:
-    image: ghcr.io/juhovh/tailguard:latest
+  tailzerotrust:
+    image: ghcr.io/eurocruz/tailzerotrust:latest
     build: .
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_HOSTNAME=tailzerotrust
+      # Zero Trust enrollment with a service token, leave empty for consumer WARP
+      - WARP_ORGANIZATION=${WARP_ORGANIZATION:-}
+      - WARP_AUTH_CLIENT_ID=${WARP_AUTH_CLIENT_ID:-}
+      - WARP_AUTH_CLIENT_SECRET=${WARP_AUTH_CLIENT_SECRET:-}
     volumes:
-      - ./config:/etc/wireguard
-      - ./state:/tailguard/state
+      - ./state:/tailzerotrust/state
+      - ./warp:/var/lib/cloudflare-warp
     cap_add:
       - NET_ADMIN
     devices:

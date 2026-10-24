@@ -1,182 +1,134 @@
-# TailGuard
+# TailZeroTrust
 
-A simple Docker container app which allows connecting existing WireGuard hosts
-to the Tailscale network, in case the device running WireGuard is locked in
-and/or does not support Tailscale binaries.
+A simple Docker container app which turns the official Cloudflare WARP client
+into a Tailscale exit node. Select it as the exit node on any device in your
+tailnet and its traffic goes out through Cloudflare WARP or your Cloudflare
+Zero Trust organization.
+
+TailZeroTrust is a fork of [TailGuard](https://github.com/juhovh/tailguard),
+with the WireGuard tunnel replaced by the Cloudflare WARP daemon.
 
 The network topology will look roughly like this:
 ```
-  +---------+                                                       +---------+
-  | device1 |\                                                     /| device4 |
-  +---------+ \                        VPS                        / +---------+
-  +---------+  \ +-----------+    +-----------+    +-----------+ /  +---------+
-  | device2 |----| Tailscale |<-->| TailGuard |<-->| WireGuard |----| device5 |
-  +---------+  / +-----------+    +-----------+    +-----------+ \  +---------+
-  +---------+ /                                                   \ +---------+
-  | device3 |/                                                     \| device6 |
-  +---------+                                                       +---------+
+  +---------+
+  | device1 |\
+  +---------+ \                        VPS
+  +---------+  \ +-----------+    +---------------+    +----------------+
+  | device2 |----| Tailscale |<-->| TailZeroTrust |<-->| Cloudflare     |
+  +---------+  / +-----------+    +---------------+    | WARP/Zero Trust|
+  +---------+ /                                        +----------------+
+  | device3 |/
+  +---------+
 ```
-
-As usual, the tailnet is virtual and in reality connections are point-to-point,
-but all connections to WireGuard are tunneled through the TailGuard server with
-a fixed and persistent connection. As long as you have access to a server as
-close to the WireGuard host as possible (ideally with a minimal ping), for
-example a VPS, you can connect any WireGuard device to your tailnet.
 
 ## Benefits
 
-Why would you want to do this? For most use cases it may be easier to connect
-your device with Tailscale or WireGuard directly, but there are a couple of
-benefits with this bridged approach:
-- the WireGuard tunnel private key is stored only on a single machine, making
-  the key management less work
-- if you have a new device, you can simply log in to your tailnet with SSO,
-  without having to transfer keys
+Why would you want to do this? For most use cases it may be easier to run the
+WARP client on your devices directly, but there are a couple of benefits with
+this bridged approach:
+- the device enrollment and credentials are stored only on a single machine
+- devices that can't run WARP, or where you don't want to install it, can still
+  use Cloudflare Gateway policies by selecting an exit node
 - it's easier to switch between exit nodes in your tailnet, without having to
   reconnect to different VPNs
-- you can have access to both your tailnet and WireGuard concurrently on your
+- you can have access to both your tailnet and WARP concurrently on your
   mobile device, which doesn't support multiple VPNs
-- you can temporarily share access to your WireGuard tunnel with other people
-  using Tailscale, without having to share any keys
-- you can have a server that is connected to both tailnet and WireGuard hosts,
-  and serving both sides equally
-- you can create a WireGuard server that allows devices that don't support
-  Tailscale to connect to the tailnet, including using tailnet exit nodes
+- you can temporarily share access to WARP with other people using Tailscale,
+  without having to enroll their devices
 
 ## Installation
 
-The simplest way to start TailGuard is to simply download a WireGuard config and
-save it as `wg0.conf`. After that you can create an IPv6 network (optional, but
-recommended) and start the container:
+The simplest way to start TailZeroTrust is with consumer WARP, which needs no
+account at all:
 
 ```
 docker network create --ipv6 ip6net
 docker run -it \
-  -v ./wg0.conf:/etc/wireguard/wg0.conf -v ./state:/tailguard/state \
+  -v ./state:/tailzerotrust/state -v ./warp:/var/lib/cloudflare-warp \
   --cap-add NET_ADMIN --device /dev/net/tun \
   --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv6.conf.all.forwarding=1 \
   --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   --network ip6net -p 41641:41641/udp \
-  --name tailguard ghcr.io/juhovh/tailguard:latest
+  --name tailzerotrust ghcr.io/eurocruz/tailzerotrust:latest
 ```
 
 Docker will print you an URL where you need to log in to your tailnet, and after
-that you should be good to go.
+that you should be good to go. Approve the exit node in the Tailscale admin
+console, select it on your device and visit <https://www.cloudflare.com/cdn-cgi/trace>,
+which should show `warp=on` (or `warp=plus`).
 
 If you want to build the latest version of the image yourself, it might be best
-to use `docker compose`. In that case you should store the `wg0.conf` file under
-`config/`, build the latest image with `docker compose build` and finally run it
-with `docker compose up`.
+to use `docker compose`. In that case build the latest image with
+`docker compose build` and finally run it with `docker compose up`.
 
 That's it, happy networking!
 
-### Advanced settings
+### Cloudflare Zero Trust
 
-Let's imagine you have a WireGuard server running on 10.1.0.1 that is able to
-accept any routes, and its local LAN network is 192.168.8.0/24. You have already
-downloaded the WireGuard client config for this tunnel and saved it. Make sure
-that the subnet 192.168.8.0/24 is explicitly mentioned in the AllowedIPs section
-in addition to 0.0.0.0/0, for TailGuard to pick it up. It should look something
-like this:
-
-```
-[Interface]
-PrivateKey = <REDACTED>
-Address = 10.1.0.2/24,fd00:ed7c:a960:6e9b::2/64
-DNS = 10.1.0.1,fd00:ed7c:a960:6e9b::1
-MTU = 1420
-
-[Peer]
-PublicKey = <REDACTED>
-PresharedKey = <REDACTED>
-AllowedIPs = 0.0.0.0/0,::/0,192.168.8.0/24
-Endpoint = <REDACTED>:51820
-PersistentKeepalive = 25
-```
-
-Next you can either add `-e TS_DEST_IP=10.1.0.1,fd00:ed7c:a960:6e9b::1` if
-running directly, or open the docker-compose.yml and modify it as follows:
+To enroll the container into your Zero Trust organization without a browser,
+create a service token in **Access → Service Auth**, allow it to enroll devices
+in **Settings → WARP Client → Device enrollment permissions** (a rule with the
+*Service Auth* action), and pass it in:
 
 ```
     environment:
-      - TS_DEST_IP=10.1.0.1,fd00:ed7c:a960:6e9b::1
+      - WARP_ORGANIZATION=your-team-name
+      - WARP_AUTH_CLIENT_ID=xxxxxxxx.access
+      - WARP_AUTH_CLIENT_SECRET=xxxxxxxx
 ```
 
-This will use the device wg0 and therefore the wg0.conf file for WireGuard. It
-will connect to the tailnet, forward all connections targeting itself to the
-router behind the tunnel, advertise the "192.168.8.0/24" route to other tailnet
-hosts, advertise itself as an exit node, and authenticate with the given
-authkey.
+Alternatively you can register it as a
+[WARP Connector](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/private-net/warp-connector/)
+with `WARP_CONNECTOR_TOKEN`.
+
+The Split Tunnels settings of the device profile still apply. The default
+exclude list contains `100.64.0.0/10`, which is fine: TailZeroTrust routes the
+tailnet itself and sends everything forwarded from it into WARP.
+
+### Advanced settings
 
 Supported configuration parameters through environment:
-- `TG_EXPOSE_HOST` - Set to 1 if you want to allow connections from TS and WG peers
-- `TG_CLIENT_MODE` - Set to 1 to behave as a Tailscale client, allows setting an exit node
-- `TG_NAMESERVERS` - Fallback nameservers for resolving hostnames (**default:** Cloudflare 1.1.1.1)
-- `TG_WEBUI_PORT` - Set to TCP port to serve status UI on, will be opened on firewall automatically
-- `WG_DEVICE` - WireGuard device name, must be valid and match config file name (**default:** wg0)
-- `WG_ISOLATE_PEERS` - Set to 1 to isolate WireGuard peers from each other
+- `TG_EXPOSE_HOST` - Set to 1 if you want to allow connections from TS and WARP peers
+- `TG_NAMESERVERS` - Nameservers to use if WARP leaves the Docker resolver in place (**default:** Cloudflare 1.1.1.1)
+- `WARP_ORGANIZATION` - Zero Trust team name, consumer WARP is used if not set
+- `WARP_AUTH_CLIENT_ID` - Zero Trust service token client ID for enrollment
+- `WARP_AUTH_CLIENT_SECRET` - Zero Trust service token client secret for enrollment
+- `WARP_CONNECTOR_TOKEN` - Register as a WARP Connector with the given token instead
+- `WARP_PROTOCOL` - Tunnel protocol for Zero Trust, `wireguard` or `masque` (**default:** from device profile)
+- `WARP_LICENSE_KEY` - WARP+ license key for consumer WARP
+- `WARP_CONNECT_TIMEOUT` - Seconds to wait for WARP to connect (**default:** 120)
 - `TS_DEVICE` - Tailscale device name, must be a valid device name (**default:** tailscale0)
 - `TS_PORT` - Tailscale port number, should be exposed by Docker (**default:** 41641)
 - `TS_LOGIN_SERVER` - URL of the control server if not using Tailscale default
 - `TS_AUTHKEY` - Tailscale auth key for authentication if used
 - `TS_HOSTNAME` - Tailscale hostname for this device if used
-- `TS_DEST_IP` - Destination IP to route Tailscale traffic to, IPv4 and/or IPv6
-- `TS_ROUTES` - Set routes to advertise, overrides autodetected routes if needed
-- `TS_EXIT_NODE` - Set Tailscale exit node, only works with client mode enabled
+- `TS_ROUTES` - Set routes to advertise in addition to the exit node
 
 Some of these parameteres follow the naming of Tailscale Docker image
 [parameters](https://tailscale.com/kb/1282/docker), in which case they should
 also work the same way.
 
-### TailGuard Web UI
+### How it works
 
-TailGuard provides a single web page that can be used to monitor both Tailscale
-and all the WireGuard tunnels configured. It is not enabled by default, and to
-enable the Web UI you need to set the `TG_WEBUI_PORT` environment variable, for
-example `TG_WEBUI_PORT=8080`.
+The WARP daemon routes everything that is not marked with its own fwmark
+through the `CloudflareWARP` interface, much like `wg-quick` does. On top of
+that, it installs an nftables firewall which drops traffic bypassing the tunnel.
 
-You don't need to enable `TG_EXPOSE_HOST` to use the feature, the Web UI port
-will be available from both the Tailscale and WireGuard networks. However, do
-note that if you have enabled `TS_DEST_IP` to route Tailscale traffic to a
-different IP address, then you cannot access the Web UI with the corresponding
-Tailscale IP.
+- The patched Tailscale from TailGuard doesn't take over the default routes,
+  and ignores the `CloudflareWARP` interface.
+- Tailscale's own packets carry the `0x80000` mark, so they keep using the
+  regular network, while the healthcheck keeps exceptions for them in the WARP
+  firewall (WARP rebuilds it on reconnects).
+- Packets forwarded from the tailnet may only leave through `CloudflareWARP`:
+  if WARP is down, nothing is forwarded at all.
+- Only `warp-svc` and `warp-cli` are taken from the official package, which
+  otherwise depends on a full desktop stack. As WARP is built against glibc,
+  the image is based on Debian instead of Alpine.
 
-Please see a screenshot of the Web UI (with node specific details redacted) below:
+### Updates
 
-<img width="608" height="761" alt="TailGuard Web UI" src="https://github.com/user-attachments/assets/dd69af40-ecac-4035-ba1b-44a62458f3de" />
-
-### Two-way routing between the networks
-
-Unlike Tailscale, WireGuard itself does not handle any routing. Therefore, the
-WireGuard subnets and routes are automatically advertised on the Tailscale
-network, but it doesn't work the other way around.
-
-Let's say your TailGuard node has IP addresses `10.1.0.2` and
-`fd00:ed7c:a960:6e9b::2` for the WireGuard tunnel, like in the above config. You
-likely want to add at least routes `100.64.0.0/10` and `fd7a:115c:a1e0::/48`
-(Tailscale private address spaces) to be routed through `10.1.0.2`.
-
-The easiest way is to modify the AllowedIPs section to include the Tailscale
-network segments and any other subnets you'd like to route through TailGuard:
-
-```
-[Peer]
-PublicKey = <REDACTED>
-PresharedKey = <REDACTED>
-AllowedIPs = 10.1.0.2/32,fd00:ed7c:a960:6e9b::2/128,100.64.0.0/10,fd7a:115c:a1e0::/48
-```
-
-If your router doesn't allow modifying the WireGuard configuration, you could
-use its routing UI or the console to do something along the lines of:
-
-```
-ip route add 100.64.0.0/10 via 10.1.0.2 dev wgserver
-ip route add fd7a:115c:a1e0::/48 via fd00:ed7c:a960:6e9b::2 dev wgserver
-```
-
-If you have additional subnets in your tailnet (e.g. `192.168.1.0/24`) that
-you'd like to access, just add similar routing rules for those. TailGuard should
-take care of forwarding all the published subnets to the tailnet, as long as it
-is able to receive packets through the WireGuard tunnel first.
-
-For more examples, please see the [examples](examples) directory.
+`.github/workflows/update.yml` checks for new Tailscale and Cloudflare WARP
+releases every six hours. When either is out, it bumps the version in the
+Dockerfile, tags the commit as `<tailscale>-warp<warp>`, publishes the image
+for `amd64` and `arm64` and creates a GitHub release. The image is also rebuilt
+daily from `main` to pick up Debian security updates.
