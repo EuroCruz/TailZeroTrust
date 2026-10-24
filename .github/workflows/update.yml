@@ -28,15 +28,8 @@ jobs:
           warp_current="$(sed -n 's/^ARG WARP_VERSION="\(.*\)"$/\1/p' Dockerfile)"
 
           ts_latest="$(gh api repos/tailscale/tailscale/releases/latest --jq .tag_name)"
-          # Only take a WARP version once it is published for every platform
-          warp_latest=""
-          for arch in amd64 arm64; do
-            v="$(curl -fsSL "https://pkg.cloudflareclient.com/dists/bookworm/main/binary-$arch/Packages" \
-              | sed -n 's/^Version: //p' | sort -V | tail -n 1)"
-            if [ -z "$warp_latest" ] || [ "$(printf '%s\n%s\n' "$warp_latest" "$v" | sort -V | head -n 1)" = "$v" ]; then
-              warp_latest="$v"
-            fi
-          done
+          warp_latest="$(curl -fsSL "https://pkg.cloudflareclient.com/dists/bookworm/main/binary-amd64/Packages" \
+            | sed -n 's/^Version: //p' | sort -V | tail -n 1)"
           echo "Tailscale: $ts_current -> $ts_latest"
           echo "WARP: $warp_current -> $warp_latest"
 

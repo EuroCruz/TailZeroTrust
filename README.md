@@ -130,5 +130,5 @@ that, it installs an nftables firewall which drops traffic bypassing the tunnel.
 `.github/workflows/update.yml` checks for new Tailscale and Cloudflare WARP
 releases every six hours. When either is out, it bumps the version in the
 Dockerfile, tags the commit as `<tailscale>-warp<warp>`, publishes the image
-for `amd64` and `arm64` and creates a GitHub release. The image is also rebuilt
+for `amd64` and creates a GitHub release. The image is also rebuilt
 daily from `main` to pick up Debian security updates.
