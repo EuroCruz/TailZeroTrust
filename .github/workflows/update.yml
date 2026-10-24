@@ -14,6 +14,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
+      ref: ${{ steps.check.outputs.ref }}
       tag: ${{ steps.check.outputs.tag }}
     steps:
       - name: Checkout repository
@@ -35,6 +36,18 @@ jobs:
 
           newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$2" ]; }
           changes=""
+
+          # Go builder image, a new version alone only refreshes :latest
+          go_current="$(sed -n 's/^FROM golang:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)"
+          go_alpine="$(sed -n 's/^FROM golang:[0-9.]*-alpine\([0-9.]*\).*/\1/p' Dockerfile)"
+          go_latest="$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -n 1 | sed 's/^go//')"
+          echo "Go: $go_current -> $go_latest"
+          go_changed=""
+          if newer "$go_current" "$go_latest" && \
+              curl -fs -o /dev/null "https://hub.docker.com/v2/repositories/library/golang/tags/$go_latest-alpine$go_alpine"; then
+            sed -i "s/^FROM golang:$go_current-alpine/FROM golang:$go_latest-alpine/" Dockerfile
+            go_changed="golang to $go_latest"
+          fi
           if newer "$ts_current" "$ts_latest"; then
             sed -i "s/^ARG TS_VERSION=\".*\"$/ARG TS_VERSION=\"$ts_latest\"/" Dockerfile
             changes="Tailscale to $ts_latest"
@@ -48,24 +61,33 @@ jobs:
             warp_latest="$warp_current"
           fi
 
-          if [ -z "$changes" ]; then
-            echo "Everything is up to date"
-            exit 0
-          fi
-
-          tag="${ts_latest}-warp${warp_latest}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ -z "$changes" ]; then
+            if [ -n "$go_changed" ]; then
+              git commit -am "Upgrade $go_changed"
+              git push origin HEAD:main
+              echo "ref=main" >> "$GITHUB_OUTPUT"
+            else
+              echo "Everything is up to date"
+            fi
+            exit 0
+          fi
+          [ -n "$go_changed" ] && changes="$go_changed, $changes"
+
+          tag="${ts_latest}-warp${warp_latest}"
           git commit -am "Upgrade $changes"
           git tag "$tag"
           git push origin HEAD:main "$tag"
+          echo "ref=$tag" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   build:
     needs: check
-    if: needs.check.outputs.tag != ''
+    if: needs.check.outputs.ref != ''
     uses: ./.github/workflows/ghcr-publish.yml
     with:
-      ref: ${{ needs.check.outputs.tag }}
+      ref: ${{ needs.check.outputs.ref }}
       version: ${{ needs.check.outputs.tag }}
     secrets: inherit

@@ -3,6 +3,9 @@ FROM golang:1.27.3-alpine3.24 AS build-env
 # Install latest version of git
 RUN apk add --update --no-cache git
 
+# Let newer Tailscale releases pull the Go toolchain they require
+ENV GOTOOLCHAIN=auto
+
 # Clone latest Tailscale version and patch it with customisation, some patches
 # are lifted from the PR https://github.com/tailscale/tailscale/pull/14575
 ARG TS_VERSION="v1.104.2"
